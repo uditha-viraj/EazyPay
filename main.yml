@@ -1,0 +1,140 @@
+- name: Create infastructure for EasyPay
+  hosts: localhost-skip
+  vars:
+    vpc_id: "vpc-29f56154"
+    region: "us-east-1"
+    image_id: "ami-087c17d1fe0178315"
+    vpc_subnet_id: "subnet-a5edaa84"
+
+  tasks:
+  - name: Installing boto & boto3 on local system
+    pip:
+      name: "{{ item }}"
+      state: present
+    loop:
+      - boto 
+      - boto3
+
+  - name: Creating Security Group for K8s Cluster
+    amazon.aws.ec2_group:
+      name: "k8sSecurityGroupExt"
+      description: sg with rule descriptions
+      vpc_id: "{{ vpc_id }}"
+      region: "{{ region }}"
+      rules:
+        - proto: tcp
+          ports:
+          - 8001
+          cidr_ip: 0.0.0.0/0
+          rule_desc: allow all on port 8001
+        - proto: tcp
+          ports:
+          - 22
+          cidr_ip: 0.0.0.0/0
+          rule_desc: allow all on port 22
+
+  - name: Creating Security Group for K8s Cluster
+    amazon.aws.ec2_group:
+      name: "k8sSecurityGroupInt"
+      description: sg with rule descriptions
+      vpc_id: "{{ vpc_id }}"
+      region: "{{ region }}"
+      rules:
+        - proto: all
+          group_name: k8sSecurityGroupExt
+
+  - name: start an instance with a public IP address
+    amazon.aws.ec2_instance:
+      name: "EazyPay-K8s-{{ item  }}"
+      key_name: "EasyPayKey"
+      vpc_subnet_id: subnet-a5edaa84
+      instance_type: t2.micro
+      security_groups:
+        - "k8sSecurityGroupExt"
+        - "k8sSecurityGroupInt"
+      network:
+        assign_public_ip: true
+      image_id: "{{ image_id }}"
+      tags:
+        Environment: EazyPayCluster
+      state: running
+    register: ec2
+    loop:
+      - master-1
+      - worker-1
+      - worker-2 
+
+  - name: Check if port 80 is listening
+    wait_for:
+      host: "{{ item.instances[0].public_ip_address }}"
+      port: 22
+      delay: 20
+      timeout: 120
+      msg: "Timeout waiting for 80 to respond"
+    ignore_errors: yes
+    loop: "{{ ec2.results }}"
+
+  - name: Print public IPs
+    debug:
+      msg: "{{ item.instances[0].public_ip_address }}"
+    loop: "{{ ec2.results }}"
+
+- name: Ansible Test Playbook
+    gather_facts: false
+    hosts: tag_Environment_EazyPayCluster
+    remote_user: ec2-user
+    become: yes
+    become_method: sudo
+    vars:
+      ansible_ssh_private_key_file: EasyPayKey.pem
+    tasks:
+    - name: Run Shell Command
+      command: hostname
+      register: hostname
+
+    - name: Print hostnames
+      debug:
+        msg: "{{ hostname }}"
+
+    - name: installing docker 
+      package:
+        name:
+        - docker
+        state: present
+
+    - name: configuring yum repo for k8s
+      yum_repository:
+        name: kubernetes
+        description: yum for k8s
+        baseurl: https://packages.cloud.google.com/yum/repos/kubernetes-el7-\$basearch
+        enabled: yes
+        gpgcheck: yes
+        repo_gpgcheck: yes
+        gpgkey: https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+        exclude:
+        - kubelet
+        - kubeadm
+        - kubectl    
+    
+    - name: installing kubeadm
+      yum:
+        name: kubeadm
+        disable_excludes: kubernetes
+    
+    - name: installing iproute-tc
+      package:
+        name:
+        - iproute-tc
+        state: present
+    
+    - name: enabling docker and kubelet service
+      service:
+        name: "{{ item }}"  
+        state: started
+        enabled: yes
+      loop:
+        - kubelet
+        - docker
+    
+    - name: pulling all images
+      shell: kubeadm config images pull
